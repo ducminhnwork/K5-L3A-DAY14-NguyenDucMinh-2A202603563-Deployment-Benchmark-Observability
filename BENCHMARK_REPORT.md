@@ -4,7 +4,7 @@
 **Ngày chạy:** 2026-11-25
 **Môi trường:** Windows + WSL2 (Debian), Docker Desktop. Chưa đo thông số CPU/RAM cụ thể của máy.
 
-> Mọi con số trong mục 2 và 3 lấy từ các file `reports/*.json` do `load_test.py` và `run_eval.py` ghi ra. Mục 4 và 5 (stack quan sát, Locust scale) **chưa làm**, sẽ điền khi chạy xong.
+> Mọi con số trong mục 2 và 3 lấy từ các file `reports/*.json` do `load_test.py` và `run_eval.py` ghi ra. Mục 4 dựa trên ảnh chụp trong `screenshots/` và log/trace thật; mục 5 lấy từ `benchmark-results/scale_1_stats.csv` và `scale_3_stats.csv`.
 
 ---
 
@@ -83,11 +83,69 @@ Sau khi sửa và khởi động lại v2, eval chạy với `--min-accuracy 1.0
 
 ## 4. Observability stack (production)
 
-(Chưa làm.)
+Stack chạy bằng Docker Compose (project `k5-day14-observability`): agent (FastAPI, `/metrics` + OpenTelemetry) sau Nginx :8080, Prometheus :9090, Grafana :3000, Jaeger :16686, Locust :8089. Agent dùng mock LLM `mock-llm-small`, phiên bản `v2`.
+
+### 4.1 Ảnh chụp
+
+| Yêu cầu | File |
+|---|---|
+| Dashboard Grafana có số liệu thật | `screenshots/grafana-dashboard.png` |
+| Trace Jaeger chậm | `screenshots/jaeger-slow-trace.png` |
+| Trace Jaeger lỗi | `screenshots/jaeger-error-trace.png` |
+| Alert Prometheus đang firing | `screenshots/prometheus-alert-firing.png` |
+
+Dashboard lúc chạy Locust 30 user (tải bình thường, lỗi mặc định 1%): traffic 18.7 req/s, error rate 0.97%, latency p95 294 ms, saturation 0, 1 instance, chi phí LLM tích lũy $0.0584. Panel "Phiên bản đang chạy" hiện model `mock-llm-small`, agent version `v2`, 1 instance.
+
+### 4.2 Thí nghiệm alert
+
+Mình chỉ chạy **một** thí nghiệm, bật hai lỗi cùng lúc ở agent rồi chạy Locust 30 user: `MOCK_ERROR_RATE=0.2` và `MOCK_SLOW_RATE=0.3` (bật lúc 17:43). Các thí nghiệm khác (đổi `LLM_MODEL`, `docker pause`, đổi `AGENT_VERSION`) **chưa chạy**.
+
+Thời gian chờ `for:` trong `alert_rules.yml`: AgentHighErrorRate 1m, AgentHighLatencyP95 2m, AgentInstanceDown 30s, LLMCostBurnRateHigh 2m.
+
+| Giờ (17:xx) | AgentHighErrorRate | AgentHighLatencyP95 | LLMCostBurnRateHigh |
+|---|---|---|---|
+| 17:44 | PENDING | PENDING | FIRING |
+| 17:45 | FIRING | PENDING | INACTIVE |
+| 17:46 | FIRING | FIRING | INACTIVE |
+
+- Từ lúc bật lỗi (17:43) đến lúc cả 2 alert SLO cùng firing (17:46): khoảng 3 phút.
+- LLMCostBurnRateHigh đang FIRING lúc 17:44 là do đợt Locust chạy trước đó (chưa phải do thí nghiệm này), rồi tự về INACTIVE khi lỗi làm lượng token giảm.
+- AgentInstanceDown vẫn INACTIVE vì không có agent nào chết.
+
+### 4.3 Debug bằng trace và log
+
+Tìm trace lỗi bằng Jaeger (`error=true`), chọn trace chậm nhất có lỗi:
+
+- Trace ID: `1a097ceb249b8234a1189ced8c0714a2`, bắt đầu 17:47:58, tổng 866 ms, `POST /ask` trả 503.
+- 4 span: `POST /ask` (866 ms) → `agent.run` (863 ms, có exception "Upstream LLM error: 503 Service Unavailable (mock)") → `agent.retrieve_context` (25.4 ms) và `chat mock-llm-small` (837 ms, đánh dấu lỗi).
+- Kết luận: gần như toàn bộ thời gian (837/866 ms, khoảng 97%) nằm ở lệnh gọi LLM; bước retrieval chỉ 25 ms. Vậy nút thắt và nguồn lỗi là LLM, không phải retrieval hay Nginx.
+
+Dòng log JSON cùng `trace_id` (lấy bằng `docker compose logs agent`):
+
+```json
+{"ts": "2026-11-25T10:47:59.127446+00:00", "level": "INFO", "service": "observable-agent", "instance": "60a7093673b6", "event": "llm_error", "trace_id": "1a097ceb249b8234a1189ced8c0714a2", "span_id": "19cb98bd54397631", "request_id": "2aa4700038fe", "error": "Upstream LLM error: 503 Service Unavailable (mock)"}
+{"ts": "2026-11-25T10:47:59.127827+00:00", "level": "INFO", "service": "observable-agent", "instance": "60a7093673b6", "event": "http_request", "trace_id": "1a097ceb249b8234a1189ced8c0714a2", "span_id": "19cb98bd54397631", "request_id": "2aa4700038fe", "method": "POST", "route": "/ask", "status": 503, "ms": 865.2}
+```
+
+Có `trace_id` trong log nên từ một dòng log lỗi có thể nhảy sang trace tương ứng trong Jaeger, và ngược lại.
 
 ## 5. Benchmark scaling (production, Locust headless)
 
-(Chưa làm.)
+Mỗi lần chạy: 100 user, spawn 10 user/giây, 2 phút, qua Nginx, lỗi mặc định (`MOCK_ERROR_RATE=0.01`, `MOCK_SLOW_RATE=0.03`). Chỉ khác số agent. Số liệu cho `POST /ask`, lấy từ `benchmark-results/scale_1_stats.csv` và `scale_3_stats.csv`.
+
+| Số agent | Request | Lỗi | Tỉ lệ lỗi | req/s | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|---|---|---|---|
+| 1 | 7012 | 65 | 0.93% | 58.68 | 200 | 570 | 1700 |
+| 3 | 7099 | 65 | 0.92% | 59.44 | 200 | 340 | 1700 |
+
+Nhận xét:
+
+- Thông lượng gần như không đổi (58.68 → 59.44 req/s). Với 100 user có thời gian chờ giữa các request, tải bị giới hạn ở phía Locust, nên 1 agent đã đủ xử lý hết; thêm agent không tăng được req/s.
+- p95 giảm từ 570 ms xuống 340 ms (khoảng 40%) vì tải được Nginx chia đều cho 3 agent, ít request phải chờ hàng đợi.
+- p99 giữ 1700 ms ở cả hai, do các request chậm cố ý (`MOCK_SLOW_RATE`) chứ không phải do thiếu tài nguyên.
+- Toàn bộ 65 lỗi là 503 từ mock LLM (`MOCK_ERROR_RATE` mặc định 1%), không phải do scale.
+- Lưu ý: lần đo đầu cho "3 agent" bị hỏng (lệnh `docker compose run` tự xóa agent-3 nên thực tế chỉ có 2 agent), mình đã bỏ và chạy lại với `--no-deps`; bảng trên là lần chạy lại.
+- Hạn chế: chưa thử tải cao hơn (nhiều user hơn) để thấy 1 agent bão hòa còn 3 agent thì không.
 
 ---
 
