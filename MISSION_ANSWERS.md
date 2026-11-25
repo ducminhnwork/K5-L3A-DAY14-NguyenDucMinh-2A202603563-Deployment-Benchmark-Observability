@@ -141,7 +141,7 @@ production-redis-1    Up (healthy)   6379/tcp
 
 ## Part 3: Cloud Deployment
 
-(chưa làm)
+**Không làm phần này.** Mình không deploy `06-lab-complete` lên Railway hay Render nên không có URL công khai, ảnh `dashboard.png`/`running.png`/`test.png` và `DEPLOYMENT.md`. Bản `06-lab-complete` vẫn có sẵn `railway.toml` và `render.yaml`; nó đã chạy đủ (PASS 12/12 ở `check_production_ready.py`) bằng Docker Compose trên máy local, xem Part 6.
 
 ## Part 4: API Security
 
@@ -277,3 +277,6 @@ Cách làm chính trong `06-lab-complete/`:
 - **Part 1 (Exercise 1.1):** hỏi Claude đọc `develop/app.py` và liệt kê anti-pattern. Nhận danh sách 9 mục. Mình tự đối chiếu từng mục với đoạn code tương ứng trong file.
 - **Môi trường:** nhờ Claude hướng dẫn dựng WSL2 (Debian từ image Docker Python 3.11) và bật Docker trong WSL. Mình tự chạy lệnh và kiểm tra bằng `python3 --version`, `docker version`, `docker compose version`, `docker run --rm hello-world`.
 - **Exercise 1.2, 1.3:** lệnh chạy do Claude gợi ý; mình tự chạy, kết quả ở trên là output thật.
+- **Part 4, 5:** Claude gợi ý lệnh kiểm tra (401/403/200, vòng lặp 429, test stateless); mình tự chạy và dán output thật. Một số Dockerfile gọi `apt-get` bị mạng chặn nên mình bỏ các dòng đó vì dependency toàn là Python thuần.
+- **Part 6:** Claude viết mã cho `06-lab-complete` (config, auth, rate limit, cost guard, health/ready, Dockerfile nhiều tầng). Mình tự build, chạy `check_production_ready.py` và dán kết quả PASS 12/12.
+- **Part 7:** Claude hướng dẫn chạy load test, eval, dựng stack Prometheus/Grafana/Jaeger/Locust và các thí nghiệm alert; mình tự chạy và chụp màn hình. Mọi số trong `BENCHMARK_REPORT.md` lấy từ `reports/*.json` và `benchmark-results/*.csv`. Lần đo scale đầu bị sai (chỉ chạy 2 agent) nên mình chạy lại. Lỗi `ModuleNotFoundError: uvicorn` do thư mục home của user trong container được sửa bằng `PYTHONPATH`.
